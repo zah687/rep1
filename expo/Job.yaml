@@ -1,0 +1,26 @@
+apiVersion: batch/v1
+kind: Job
+
+metadata:
+  name: sdo-expo-job
+
+spec:
+  backoffLimit: 0
+
+  template:
+    spec:
+      restartPolicy: Never
+
+      containers:
+        - name: sdo-expo-application
+          image: sdo-expo:2.0
+          imagePullPolicy: Never
+          args: ["2", "10"]
+
+          resources:
+            limits:
+              memory: "64Mi"
+              cpu: "250m"
+            requests:
+              memory: "16Mi"
+              cpu: "50m"

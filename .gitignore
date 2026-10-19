@@ -1,0 +1,41 @@
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Windows
+Thumbs.db
+Desktop.ini
+
+# Linux / Editors
+*~
+*.swp
+*.swo
+.vscode/
+.idea/
+
+# C compilation artifacts
+/sdo-expo
+/expo/sdo-expo
+/server
+/website/server
+*.o
+*.obj
+*.out
+*.exe
+*.a
+*.so
+*.dylib
+
+# Debugging and temporary files
+*.log
+*.tmp
+*.temp
+core
+core.*
+
+# Local environment files
+.env
+.env.*
+!.env.example

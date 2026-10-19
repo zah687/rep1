@@ -1,0 +1,230 @@
+name: Jenkins Bonus Validation
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - Jenkinsfile
+
+permissions:
+  contents: read
+
+jobs:
+  jenkins-check:
+    name: Run Student Jenkinsfile
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    env:
+      JENKINS_URL: http://127.0.0.1:8080
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure Jenkins environment
+        run: |
+          echo "JENKINS_HOME=$RUNNER_TEMP/jenkins-home" >> "$GITHUB_ENV"
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Prepare Jenkins
+        run: |
+          set -euo pipefail
+
+          mkdir -p "$JENKINS_HOME/plugins"
+          mkdir -p "$JENKINS_HOME/init.groovy.d"
+          mkdir -p "$JENKINS_HOME/workspace/lab-validation"
+
+          curl -fL --retry 3 \
+            -o "$RUNNER_TEMP/jenkins.war" \
+            https://get.jenkins.io/war-stable/latest/jenkins.war
+
+          curl -fL --retry 3 \
+            -o "$RUNNER_TEMP/plugin-manager.jar" \
+            https://github.com/jenkinsci/plugin-installation-manager-tool/releases/download/2.13.2/jenkins-plugin-manager-2.13.2.jar
+
+          java -jar "$RUNNER_TEMP/plugin-manager.jar" \
+            --war "$RUNNER_TEMP/jenkins.war" \
+            --plugin-download-directory "$JENKINS_HOME/plugins" \
+            --plugins \
+              workflow-aggregator \
+              pipeline-model-definition \
+              workflow-job \
+              workflow-cps \
+              workflow-durable-task-step \
+              git
+
+      - name: Prepare student workspace
+        run: |
+          set -euo pipefail
+
+          cp -a "$GITHUB_WORKSPACE/." \
+            "$JENKINS_HOME/workspace/lab-validation/"
+
+          test -f "$JENKINS_HOME/workspace/lab-validation/Jenkinsfile"
+          test -f "$JENKINS_HOME/workspace/lab-validation/expo/expo.c"
+          test -f "$JENKINS_HOME/workspace/lab-validation/expo/Dockerfile"
+
+      - name: Configure Jenkins pipeline
+        run: |
+          set -euo pipefail
+
+          cat > "$JENKINS_HOME/init.groovy.d/lab.groovy" <<'GROOVY'
+          import jenkins.model.Jenkins
+          import hudson.security.SecurityRealm
+          import hudson.security.AuthorizationStrategy
+          import org.jenkinsci.plugins.workflow.job.WorkflowJob
+          import org.jenkinsci.plugins.workflow.cps.CpsFlowDefinition
+
+          def jenkins = Jenkins.get()
+
+          // Disposable localhost-only Jenkins instance.
+          jenkins.setSecurityRealm(SecurityRealm.NO_AUTHENTICATION)
+          jenkins.setAuthorizationStrategy(
+              AuthorizationStrategy.UNSECURED
+          )
+
+          jenkins.setNumExecutors(1)
+
+          def jobName = "lab-validation"
+
+          def jenkinsfile = new File(
+              System.getenv("JENKINS_HOME"),
+              "workspace/${jobName}/Jenkinsfile"
+          )
+
+          if (!jenkinsfile.isFile()) {
+              throw new IllegalStateException(
+                  "Jenkinsfile not found: ${jenkinsfile}"
+              )
+          }
+
+          def job = jenkins.getItem(jobName)
+
+          if (job == null) {
+              job = jenkins.createProject(
+                  WorkflowJob.class,
+                  jobName
+              )
+          }
+
+          job.setDefinition(
+              new CpsFlowDefinition(
+                  jenkinsfile.getText("UTF-8"),
+                  false
+              )
+          )
+
+          job.save()
+          jenkins.save()
+
+          def scheduled = job.scheduleBuild2(0)
+
+          if (scheduled == null) {
+              throw new IllegalStateException(
+                  "Failed to schedule Jenkins pipeline."
+              )
+          }
+
+          println("Student Jenkinsfile scheduled.")
+          GROOVY
+
+      - name: Start Jenkins
+        run: |
+          set -euo pipefail
+
+          nohup java \
+            -Djenkins.install.runSetupWizard=false \
+            -jar "$RUNNER_TEMP/jenkins.war" \
+            --httpPort=8080 \
+            --httpListenAddress=127.0.0.1 \
+            > "$RUNNER_TEMP/jenkins-server.log" 2>&1 &
+
+          echo $! > "$RUNNER_TEMP/jenkins.pid"
+
+      - name: Wait for Jenkins
+        run: |
+          set -euo pipefail
+
+          for i in $(seq 1 120); do
+            if curl -fsS \
+              "$JENKINS_URL/api/json" \
+              > /dev/null 2>&1; then
+              echo "Jenkins is ready."
+              exit 0
+            fi
+
+            if ! kill -0 "$(cat "$RUNNER_TEMP/jenkins.pid")" 2>/dev/null; then
+              echo "Jenkins terminated unexpectedly."
+              cat "$RUNNER_TEMP/jenkins-server.log"
+              exit 1
+            fi
+
+            sleep 3
+          done
+
+          echo "Jenkins startup timed out."
+          exit 1
+
+      - name: Execute and validate Jenkins pipeline
+        run: |
+          set -euo pipefail
+
+          echo "Waiting for Jenkins pipeline result..."
+
+          for i in $(seq 1 240); do
+            response=$(curl -fsS \
+              "$JENKINS_URL/job/lab-validation/lastBuild/api/json" \
+              2>/dev/null || true)
+
+            if [ -n "$response" ]; then
+              building=$(echo "$response" | jq -r '.building')
+              result=$(echo "$response" | jq -r '.result')
+
+              if [ "$building" = "false" ]; then
+                echo "Jenkins pipeline result: $result"
+
+                if [ "$result" = "SUCCESS" ]; then
+                  echo "Jenkins validation passed."
+                  exit 0
+                fi
+
+                echo "Jenkins validation failed."
+                exit 1
+              fi
+            fi
+
+            sleep 3
+          done
+
+          echo "Jenkins pipeline timed out."
+          exit 1
+
+      - name: Show Jenkins console output
+        if: always()
+        run: |
+          echo "========== JENKINS PIPELINE LOGS =========="
+
+          curl -fsS \
+            "$JENKINS_URL/job/lab-validation/lastBuild/consoleText" \
+            || true
+
+      - name: Show Jenkins server logs on failure
+        if: failure()
+        run: |
+          echo "========== JENKINS SERVER LOGS =========="
+
+          tail -200 "$RUNNER_TEMP/jenkins-server.log" || true
+
+      - name: Stop Jenkins
+        if: always()
+        run: |
+          if [ -f "$RUNNER_TEMP/jenkins.pid" ]; then
+            kill "$(cat "$RUNNER_TEMP/jenkins.pid")" || true
+          fi
