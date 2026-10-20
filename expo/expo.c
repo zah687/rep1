@@ -27,6 +27,6 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    printf("%g ^ %g = %g\n", base, exponent, base * exponent);
+    printf("%g ^ %g = %g\n", base, exponent, pow(base, exponent));
     return 0;
 }
